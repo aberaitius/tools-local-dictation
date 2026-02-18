@@ -103,7 +103,7 @@ record_audio_with_controls() {
   trap 'kill -INT "${ffmpeg_pid}" 2>/dev/null || true' INT TERM
 
   while kill -0 "${ffmpeg_pid}" 2>/dev/null; do
-    if IFS= read -r -s -n 1 -t 0.2 key < /dev/tty; then
+    if IFS= read -r -s -n 1 -t 1 key < /dev/tty; then
       case "${key}" in
         p|P)
           if [ "${paused}" -eq 0 ]; then
