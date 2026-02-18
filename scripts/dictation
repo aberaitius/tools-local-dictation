@@ -80,11 +80,19 @@ normalize_audio() {
 record_audio_with_controls() {
   local device_index="$1"
   local raw_file="$2"
+  local duration="${3:-}"
 
-  ffmpeg -hide_banner -loglevel warning -y \
-    -f avfoundation -i ":${device_index}" \
-    -ac 1 -ar 16000 -c:a pcm_s16le \
-    "${raw_file}" </dev/null &
+  if [ -n "${duration}" ]; then
+    ffmpeg -hide_banner -loglevel warning -y \
+      -f avfoundation -i ":${device_index}" \
+      -t "${duration}" -ac 1 -ar 16000 -c:a pcm_s16le \
+      "${raw_file}" </dev/null &
+  else
+    ffmpeg -hide_banner -loglevel warning -y \
+      -f avfoundation -i ":${device_index}" \
+      -ac 1 -ar 16000 -c:a pcm_s16le \
+      "${raw_file}" </dev/null &
+  fi
   local ffmpeg_pid=$!
   local paused=0
   local key=""
@@ -148,10 +156,14 @@ record_audio() {
   mkdir -p "${session_dir}"
 
   if [ -n "${duration}" ]; then
-    ffmpeg -hide_banner -loglevel warning -y \
-      -f avfoundation -i ":${device_index}" \
-      -t "${duration}" -ac 1 -ar 16000 -c:a pcm_s16le \
-      "${raw_file}"
+    if [ -t 0 ] && [ -r /dev/tty ]; then
+      record_audio_with_controls "${device_index}" "${raw_file}" "${duration}"
+    else
+      ffmpeg -hide_banner -loglevel warning -y \
+        -f avfoundation -i ":${device_index}" \
+        -t "${duration}" -ac 1 -ar 16000 -c:a pcm_s16le \
+        "${raw_file}"
+    fi
   else
     if [ -t 0 ] && [ -r /dev/tty ]; then
       record_audio_with_controls "${device_index}" "${raw_file}"

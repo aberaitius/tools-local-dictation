@@ -19,12 +19,12 @@ cd /Users/facere/Fun/Tools
 scripts/setup_local_dictation.sh medium
 ```
 
-What this does:
-- Ensures `ffmpeg` and `cmake` are installed
-- Clones/builds `whisper.cpp`
-- Downloads model to `models/ggml-medium.bin`
+This will:
+- ensure `ffmpeg` and `cmake` are installed
+- clone/build `whisper.cpp`
+- download `models/ggml-medium.bin`
 
-## 3) One-Click Launcher
+## 3) Start the Launcher
 
 Run directly:
 ```bash
@@ -36,65 +36,86 @@ Optional alias:
 alias dictation='"/Users/facere/Fun/Tools/Quick Dictation.command"'
 ```
 
-Persist alias in `~/.zshrc` if you want.
+Add that alias to `~/.zshrc` to keep it permanently.
 
-## 4) First Recording
+## 4) Recording Flow
 
-1. Start launcher (`dictation` or double-click file)
-2. Choose device index (Enter defaults to `0`)
-3. Set session name or press Enter
-4. Timer in minutes:
-- blank = manual mode
-- number = timed auto-stop
+1. Start `dictation`
+2. Select device (Enter defaults to `0`)
+3. Set session name (optional)
+4. Set timer in minutes:
+- blank = manual mode (with controls)
+- number = timed mode
 
-Manual mode controls:
+Manual controls:
 - `p` pause
 - `r` resume
-- `s` stop and continue to transcription
+- `s` stop and transcribe
 
-## 5) Output Files
+## 5) Duration Cap (Configurable)
 
-Saved in:
+- Default max recording length: `480` minutes (8 hours).
+- Applies even in manual mode as a safety stop.
+- Change per run:
+```bash
+DICTATION_MAX_MINUTES=360 dictation
+```
+
+## 6) Output Files
+
+Each session creates:
 - `sessions/<session-name>/raw.wav`
 - `sessions/<session-name>/clean.wav`
 - `sessions/<session-name>/clean.txt`
 - `sessions/<session-name>/clean.vtt`
 
-## 6) Language and Accent Guidance
+## 7) Language and Accent Guidance
 
-- Mostly English meetings: `--lang en` (default)
-- Afrikaans meetings: `--lang af`
+- Mostly English: `--lang en` (default)
+- Afrikaans-heavy: `--lang af`
 - Mixed speech: `--lang auto`
 
-`medium` model is recommended for South African English/Afrikaans accents.
+For South African English/Afrikaans, `medium` model is recommended.
 
-## 7) Optional Local Summary
+## 8) Sleep / Lid Behavior
 
-Install Ollama and model (example):
+- Launcher uses `caffeinate` during recording to help keep Mac awake with lid open.
+- Closing the lid usually sleeps macOS and will interrupt/stop recording.
+- For long meetings, keep lid open, plugged in.
+
+## 9) Optional Local Summary
+
+Install Ollama model (example):
 ```bash
 ollama pull qwen2.5:7b
 ```
 
-Then summarize transcript:
+Then summarize:
 ```bash
 scripts/dictation summarize --input sessions/<session>/clean.txt --ollama-model qwen2.5:7b
 ```
 
-## 8) Troubleshooting
+## 10) Tests
 
-Homebrew permission errors:
-- Fix ownership/permissions for Homebrew directories, then rerun setup.
+Run:
+```bash
+tests/test_dictation.sh
+```
+
+## 11) Troubleshooting
+
+Homebrew permission issues:
+- fix ownership/permissions for Homebrew paths, then rerun setup
 
 No microphones listed:
-- Check macOS mic permissions for Terminal.
-- Re-run: `scripts/dictation list-devices`
+- check Terminal mic permissions in macOS Privacy settings
+- run `scripts/dictation list-devices`
 
-Recording stops but no transcript:
-- Confirm `models/ggml-medium.bin` or `models/ggml-small.bin` exists.
-- Confirm `vendor/whisper.cpp/build/bin/whisper-cli` exists.
+No transcript produced:
+- ensure model exists in `models/`
+- ensure `vendor/whisper.cpp/build/bin/whisper-cli` exists
 
-Poor transcription quality:
-- Use external mic closer to speakers
-- Reduce room echo
-- Keep cross-talk minimal
-- Prefer `medium` model
+Poor quality:
+- use external mic closer to speakers
+- reduce room echo and cross-talk
+- use `medium` model
