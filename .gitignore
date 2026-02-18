@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# local runtime outputs
+sessions/
+
+# local model weights (large)
+models/
+
+# local cloned/build dependency (large)
+vendor/
+
+# optional logs/tmp
+*.log
+*.tmp

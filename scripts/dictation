@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SESSIONS_DIR="${ROOT_DIR}/sessions"
+DEFAULT_MODEL_SMALL="${ROOT_DIR}/models/ggml-small.bin"
+DEFAULT_MODEL_MEDIUM="${ROOT_DIR}/models/ggml-medium.bin"
+DEFAULT_LANG="en"
+WHISPER_BIN_DEFAULT="${ROOT_DIR}/vendor/whisper.cpp/build/bin/whisper-cli"
+
+mkdir -p "${SESSIONS_DIR}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  scripts/dictation list-devices
+  scripts/dictation record --device <index> [--duration <sec>] [--name <session_name>]
+  scripts/dictation transcribe --input <wav_file> [--model <model_path>] [--lang <en|af|auto>]
+  scripts/dictation summarize --input <transcript_txt> [--ollama-model <model_name>]
+  scripts/dictation meeting --device <index> [--duration <sec>] [--name <session_name>] [--model <model_path>] [--lang <en|af|auto>] [--ollama-model <model_name>]
+
+Notes:
+  - Fully local/offline transcription via whisper.cpp.
+  - Noise cleanup is applied with ffmpeg filters before transcription.
+  - Summary is optional and local if ollama is installed.
+USAGE
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+default_model_path() {
+  # Prefer medium for better accent/noise robustness when available.
+  if [ -f "${DEFAULT_MODEL_MEDIUM}" ]; then
+    echo "${DEFAULT_MODEL_MEDIUM}"
+  else
+    echo "${DEFAULT_MODEL_SMALL}"
+  fi
+}
+
+whisper_bin() {
+  if [ -x "${WHISPER_BIN_DEFAULT}" ]; then
+    echo "${WHISPER_BIN_DEFAULT}"
+    return
+  fi
+
+  if command -v whisper-cli >/dev/null 2>&1; then
+    command -v whisper-cli
+    return
+  fi
+
+  echo "Whisper binary not found. Run scripts/setup_local_dictation.sh first." >&2
+  exit 1
+}
+
+list_devices() {
+  require_cmd ffmpeg
+  echo "Audio input devices (avfoundation):"
+  ffmpeg -f avfoundation -list_devices true -i "" 2>&1 \
+    | sed -n '/AVFoundation audio devices/,/AVFoundation video devices/p' \
+    | sed '/Error opening/d' || true
+}
+
+normalize_audio() {
+  local input_file="$1"
+  local output_file="$2"
+
+  require_cmd ffmpeg
+  ffmpeg -hide_banner -loglevel error -y \
+    -i "${input_file}" \
+    -af "highpass=f=90,lowpass=f=7600,afftdn=nf=-28,acompressor=threshold=-21dB:ratio=2.4:attack=12:release=220:makeup=2,dynaudnorm=f=120:g=15,speechnorm=e=6.5:r=0.00008:l=1" \
+    -ac 1 -ar 16000 -c:a pcm_s16le \
+    "${output_file}"
+}
+
+record_audio_with_controls() {
+  local device_index="$1"
+  local raw_file="$2"
+
+  ffmpeg -hide_banner -loglevel warning -y \
+    -f avfoundation -i ":${device_index}" \
+    -ac 1 -ar 16000 -c:a pcm_s16le \
+    "${raw_file}" </dev/null &
+  local ffmpeg_pid=$!
+  local paused=0
+  local key=""
+
+  echo "Recording started."
+  echo "Controls: [p] pause  [r] resume  [s] stop and transcribe"
+
+  trap 'kill -INT "${ffmpeg_pid}" 2>/dev/null || true' INT TERM
+
+  while kill -0 "${ffmpeg_pid}" 2>/dev/null; do
+    if IFS= read -r -s -n 1 -t 0.2 key < /dev/tty; then
+      case "${key}" in
+        p|P)
+          if [ "${paused}" -eq 0 ]; then
+            kill -STOP "${ffmpeg_pid}" 2>/dev/null || true
+            paused=1
+            echo "Paused."
+          fi
+          ;;
+        r|R)
+          if [ "${paused}" -eq 1 ]; then
+            kill -CONT "${ffmpeg_pid}" 2>/dev/null || true
+            paused=0
+            echo "Resumed."
+          fi
+          ;;
+        s|S)
+          if [ "${paused}" -eq 1 ]; then
+            kill -CONT "${ffmpeg_pid}" 2>/dev/null || true
+          fi
+          kill -INT "${ffmpeg_pid}" 2>/dev/null || true
+          break
+          ;;
+      esac
+    fi
+  done
+
+  set +e
+  wait "${ffmpeg_pid}"
+  local ffmpeg_status=$?
+  set -e
+  trap - INT TERM
+
+  if [ "${ffmpeg_status}" -ne 0 ] && [ "${ffmpeg_status}" -ne 130 ] && [ "${ffmpeg_status}" -ne 255 ]; then
+    echo "Recording failed with status ${ffmpeg_status}" >&2
+    exit 1
+  fi
+}
+
+record_audio() {
+  local device_index="$1"
+  local duration="$2"
+  local session_name="$3"
+
+  require_cmd ffmpeg
+
+  local session_dir="${SESSIONS_DIR}/${session_name}"
+  local raw_file="${session_dir}/raw.wav"
+  local clean_file="${session_dir}/clean.wav"
+
+  mkdir -p "${session_dir}"
+
+  if [ -n "${duration}" ]; then
+    ffmpeg -hide_banner -loglevel warning -y \
+      -f avfoundation -i ":${device_index}" \
+      -t "${duration}" -ac 1 -ar 16000 -c:a pcm_s16le \
+      "${raw_file}"
+  else
+    if [ -t 0 ] && [ -r /dev/tty ]; then
+      record_audio_with_controls "${device_index}" "${raw_file}"
+    else
+      echo "Recording... press Ctrl+C to stop."
+      set +e
+      ffmpeg -hide_banner -loglevel warning -y \
+        -f avfoundation -i ":${device_index}" \
+        -ac 1 -ar 16000 -c:a pcm_s16le \
+        "${raw_file}"
+      ffmpeg_status=$?
+      set -e
+
+      # ffmpeg exits non-zero on Ctrl+C; treat that as normal manual stop.
+      if [ "${ffmpeg_status}" -ne 0 ] && [ "${ffmpeg_status}" -ne 130 ] && [ "${ffmpeg_status}" -ne 255 ]; then
+        echo "Recording failed with status ${ffmpeg_status}" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ ! -s "${raw_file}" ]; then
+    echo "No audio captured in ${raw_file}" >&2
+    exit 1
+  fi
+
+  normalize_audio "${raw_file}" "${clean_file}"
+  echo "Saved session audio: ${clean_file}"
+}
+
+transcribe_audio() {
+  local input_file="$1"
+  local model_path="$2"
+  local lang="$3"
+
+  local bin
+  bin="$(whisper_bin)"
+
+  if [ ! -f "${input_file}" ]; then
+    echo "Input audio not found: ${input_file}" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${model_path}" ]; then
+    echo "Model not found: ${model_path}" >&2
+    exit 1
+  fi
+
+  local base_path
+  base_path="${input_file%.wav}"
+
+  "${bin}" -m "${model_path}" -f "${input_file}" -l "${lang}" -otxt -ovtt -of "${base_path}" -np
+  echo "Transcript: ${base_path}.txt"
+  echo "Captions:   ${base_path}.vtt"
+}
+
+summarize_text() {
+  local transcript_file="$1"
+  local ollama_model="$2"
+
+  if [ ! -f "${transcript_file}" ]; then
+    echo "Transcript file not found: ${transcript_file}" >&2
+    exit 1
+  fi
+
+  require_cmd ollama
+
+  local summary_file="${transcript_file%.txt}.summary.md"
+  {
+    echo "You are an expert meeting analyst."
+    echo "Produce a concise, high-signal summary with these sections:"
+    echo "1) Executive summary"
+    echo "2) Key decisions"
+    echo "3) Action items (owner, task, due date if mentioned)"
+    echo "4) Risks / blockers"
+    echo "5) Open questions"
+    echo
+    echo "If a section has no data, say 'Not discussed'."
+    echo
+    echo "Transcript:"
+    cat "${transcript_file}"
+  } | ollama run "${ollama_model}" > "${summary_file}"
+
+  echo "Summary: ${summary_file}"
+}
+
+make_session_name() {
+  if [ -n "${1:-}" ]; then
+    echo "$1"
+  else
+    date +"%Y%m%d-%H%M%S"
+  fi
+}
+
+cmd="${1:-}"
+shift || true
+
+case "${cmd}" in
+  list-devices)
+    list_devices
+    ;;
+  record)
+    device=""
+    duration=""
+    name=""
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --device)
+          device="$2"; shift 2 ;;
+        --duration)
+          duration="$2"; shift 2 ;;
+        --name)
+          name="$2"; shift 2 ;;
+        *)
+          echo "Unknown argument: $1" >&2; usage; exit 1 ;;
+      esac
+    done
+
+    if [ -z "${device}" ]; then
+      echo "--device is required" >&2
+      usage
+      exit 1
+    fi
+
+    session_name="$(make_session_name "${name}")"
+    record_audio "${device}" "${duration}" "${session_name}"
+    ;;
+  transcribe)
+    input_file=""
+    model_path="$(default_model_path)"
+    lang="${DEFAULT_LANG}"
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --input)
+          input_file="$2"; shift 2 ;;
+        --model)
+          model_path="$2"; shift 2 ;;
+        --lang)
+          lang="$2"; shift 2 ;;
+        *)
+          echo "Unknown argument: $1" >&2; usage; exit 1 ;;
+      esac
+    done
+
+    if [ -z "${input_file}" ]; then
+      echo "--input is required" >&2
+      usage
+      exit 1
+    fi
+
+    transcribe_audio "${input_file}" "${model_path}" "${lang}"
+    ;;
+  summarize)
+    transcript_file=""
+    ollama_model="qwen2.5:7b"
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --input)
+          transcript_file="$2"; shift 2 ;;
+        --ollama-model)
+          ollama_model="$2"; shift 2 ;;
+        *)
+          echo "Unknown argument: $1" >&2; usage; exit 1 ;;
+      esac
+    done
+
+    if [ -z "${transcript_file}" ]; then
+      echo "--input is required" >&2
+      usage
+      exit 1
+    fi
+
+    summarize_text "${transcript_file}" "${ollama_model}"
+    ;;
+  meeting)
+    device=""
+    duration=""
+    name=""
+    model_path="$(default_model_path)"
+    lang="${DEFAULT_LANG}"
+    ollama_model=""
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --device)
+          device="$2"; shift 2 ;;
+        --duration)
+          duration="$2"; shift 2 ;;
+        --name)
+          name="$2"; shift 2 ;;
+        --model)
+          model_path="$2"; shift 2 ;;
+        --lang)
+          lang="$2"; shift 2 ;;
+        --ollama-model)
+          ollama_model="$2"; shift 2 ;;
+        *)
+          echo "Unknown argument: $1" >&2; usage; exit 1 ;;
+      esac
+    done
+
+    if [ -z "${device}" ]; then
+      echo "--device is required" >&2
+      usage
+      exit 1
+    fi
+
+    session_name="$(make_session_name "${name}")"
+    session_dir="${SESSIONS_DIR}/${session_name}"
+    clean_file="${session_dir}/clean.wav"
+    transcript_file="${session_dir}/clean.txt"
+
+    record_audio "${device}" "${duration}" "${session_name}"
+    transcribe_audio "${clean_file}" "${model_path}" "${lang}"
+
+    if [ -n "${ollama_model}" ]; then
+      summarize_text "${transcript_file}" "${ollama_model}"
+    fi
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
