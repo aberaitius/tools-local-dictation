@@ -18,7 +18,7 @@ scripts/setup_local_dictation.sh medium
 
 2. Launch recorder:
 ```bash
-"/Users/facere/Fun/Tools/Quick Dictation.command"
+"/Quick Dictation.command"
 ```
 
 3. Choose:
