@@ -15,7 +15,7 @@ xcode-select --install
 
 From project root:
 ```bash
-cd /Users/facere/Fun/Tools
+cd YOURPATH
 scripts/setup_local_dictation.sh medium
 ```
 
@@ -28,12 +28,12 @@ This will:
 
 Run directly:
 ```bash
-"/Users/facere/Fun/Tools/Quick Dictation.command"
+"/YOURPATH Dictation.command"
 ```
 
 Optional alias:
 ```bash
-alias dictation='"/Users/facere/Fun/Tools/Quick Dictation.command"'
+alias dictation='"/YOURPATH'
 ```
 
 Add that alias to `~/.zshrc` to keep it permanently.
